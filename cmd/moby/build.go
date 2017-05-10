@@ -126,6 +126,16 @@ func enforceContentTrust(fullImageName string, config *TrustConfig) bool {
 // Perform the actual build process
 // TODO return error not panic
 func buildInternal(m *Moby, name string, pull bool) []byte {
+	// start containerd TODO add debug output if verbose
+	ctdOutput := ioutil.Discard
+	ctd, err := NewContainerd(ctdOutput)
+	if err != nil {
+		log.Fatalf("Could not start containerd: %v", err)
+	}
+	defer ctd.Close()
+	usedCtd := false
+
+	// create tarball for output
 	w := new(bytes.Buffer)
 	iw := tar.NewWriter(w)
 
@@ -183,12 +193,13 @@ func buildInternal(m *Moby, name string, pull bool) []byte {
 		}
 		so := fmt.Sprintf("%03d", i)
 		path := "containers/onboot/" + so + "-" + image.Name
-		out, err := ImageBundle(path, image.Image, config, enforceContentTrust(image.Image, &m.Trust), pull)
+		out, err := ctd.Bundle(path, image.Image, config, enforceContentTrust(image.Image, &m.Trust))
 		if err != nil {
-			log.Fatalf("Failed to extract root filesystem for %s: %v", image.Image, err)
+			log.Fatalf("Failed to create bundle for %s: %v", image.Image, err)
 		}
 		buffer := bytes.NewBuffer(out)
 		initrdAppend(iw, buffer)
+		usedCtd = true
 	}
 
 	if len(m.Services) != 0 {
@@ -201,12 +212,13 @@ func buildInternal(m *Moby, name string, pull bool) []byte {
 			log.Fatalf("Failed to create config.json for %s: %v", image.Image, err)
 		}
 		path := "containers/services/" + image.Name
-		out, err := ImageBundle(path, image.Image, config, enforceContentTrust(image.Image, &m.Trust), pull)
+		out, err := ctd.Bundle(path, image.Image, config, enforceContentTrust(image.Image, &m.Trust))
 		if err != nil {
 			log.Fatalf("Failed to extract root filesystem for %s: %v", image.Image, err)
 		}
 		buffer := bytes.NewBuffer(out)
 		initrdAppend(iw, buffer)
+		usedCtd = true
 	}
 
 	// add files
@@ -215,6 +227,17 @@ func buildInternal(m *Moby, name string, pull bool) []byte {
 		log.Fatalf("failed to add filesystem parts: %v", err)
 	}
 	initrdAppend(iw, buffer)
+
+	// add content store
+	if usedCtd {
+		buffer := new(bytes.Buffer)
+		err = ctd.Store(buffer)
+		if err != nil {
+			log.Fatalf("Could not extract content store: %v", err)
+		}
+		initrdAppend(iw, buffer)
+	}
+
 	err = iw.Close()
 	if err != nil {
 		log.Fatalf("initrd close error: %v", err)
